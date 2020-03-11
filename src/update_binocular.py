@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.linalg import expm
+from tqdm import tqdm
 
 from utils import visualize_trajectory_2d,load_data
 
@@ -35,7 +36,7 @@ def imu_ekf(data_set):
     prev_pose = np.eye(4)
     prev_cov = np.eye(6)
     pose_mean = np.zeros((4,4,time_stamp.shape[1]))
-    for t in range(time_stamp.shape[1]-1):
+    for t in tqdm(range(time_stamp.shape[1]-1)):
         tau = time_stamp[0,t+1] - time_stamp[0,t]
         omega_hat = hat(omega[:,t])
         u_hat = np.hstack((omega_hat,v[:,t].reshape(3,1)))
@@ -51,6 +52,7 @@ def imu_ekf(data_set):
                    @ expm(-tau * curly_hat(omega_hat,v[:,t])).T + W
 
     #visualize_trajectory_2d(pose_mean)
+    print("Done IMU Predict")
     return pose_mean
 
 
@@ -90,6 +92,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     :return:
     '''
 
+    print("Starting Mapping Update")
     num_landmark = 200#z.shape[1]
     landmark_mean = np.zeros((3*num_landmark)) # 3M
     #landmark_mean = np.zeros((3,num_landmark)) # 3,M
@@ -103,7 +106,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     total_time = z.shape[2]
     no_observation = np.array([-1,-1,-1,-1])
     first_observation = np.zeros(3)
-    for t in range(total_time):
+    for t in tqdm(range(total_time)):
         jacobian = np.zeros((4*num_landmark, 3*num_landmark))
         z_tik = np.zeros((4 * num_landmark))
         z_sum = np.sum(z[:,0:num_landmark,t],axis=0)
