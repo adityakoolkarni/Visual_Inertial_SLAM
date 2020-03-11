@@ -90,7 +90,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     :return:
     '''
 
-    num_landmark = 1000#z.shape[1]
+    num_landmark = 200#z.shape[1]
     landmark_mean = np.zeros((3*num_landmark)) # 3M
     #landmark_mean = np.zeros((3,num_landmark)) # 3,M
     landmark_cov  = 1e-6 * np.eye(3*num_landmark) #3M x 3M
@@ -106,7 +106,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     for t in range(total_time):
         jacobian = np.zeros((4*num_landmark, 3*num_landmark))
         z_tik = np.zeros((4 * num_landmark))
-        z_sum = np.sum(z[:,:,t],axis=0)
+        z_sum = np.sum(z[:,0:num_landmark,t],axis=0)
         valid_scans = np.where(z_sum != -4)
 
         #for landmark in range(num_landmark-1):
