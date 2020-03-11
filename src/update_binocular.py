@@ -59,6 +59,7 @@ def pi(point):
     :param : point in 3D
     :return: projected point in 2D
     '''
+    point = point.reshape(4)
     return point / point[2]
 
 def inv_pi(point):
@@ -77,6 +78,7 @@ def deri_pi(point):
     :return: derivative
     '''
 
+    point = point.reshape(4)
     return np.array([[1,0,-point[0]/point[2],0],
                      [0,1,-point[1]/point[2],0],
                      [0,0,0,0],
@@ -88,7 +90,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     :return:
     '''
 
-    num_landmark = 50#z.shape[1]
+    num_landmark = 1000#z.shape[1]
     landmark_mean = np.zeros((3*num_landmark)) # 3M
     #landmark_mean = np.zeros((3,num_landmark)) # 3,M
     landmark_cov  = 1e-6 * np.eye(3*num_landmark) #3M x 3M
@@ -104,12 +106,14 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     for t in range(total_time):
         jacobian = np.zeros((4*num_landmark, 3*num_landmark))
         z_tik = np.zeros((4 * num_landmark))
-        for landmark in range(num_landmark-1):
+        z_sum = np.sum(z[:,:,t],axis=0)
+        valid_scans = np.where(z_sum != -4)
+
+        #for landmark in range(num_landmark-1):
+        for landmark in valid_scans[0]:
             lnd_mrk_strt, lnd_mrk_end = landmark * 3, landmark * 3 + 3
             stereo_strt, stereo_end = landmark * 4, landmark * 4 + 4
-            if(np.all(z[:,landmark,t] == no_observation)):
-                pass
-            elif(np.all(landmark_mean[lnd_mrk_strt:lnd_mrk_end] == first_observation)):
+            if(np.all(landmark_mean[lnd_mrk_strt:lnd_mrk_end] == first_observation)):
                 #landmark_mean[lnd_mrk_strt:lnd_mrk_end] = inv_pi(np.linalg.inv(M.T @ M) @ M.T \
                 #                                              @ z[:,landmark,t].reshape(4,1))[0:3,0]
                 landmark_mean[lnd_mrk_strt+2] = -M[2,3] / (z[0,landmark,t] - z[2,landmark,t])
@@ -137,6 +141,9 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
 
 if __name__ == '__main__':
     data_set = 'data/0027.npz'
+    x = np.arange(10).reshape(2,5)
+    x_sum = np.sum(x,axis=0)
+    d = np.where(x_sum == 5)
     t,features,linear_velocity,rotational_velocity,K,b,cam_T_imu = load_data(data_set)
     print('t',t.shape)
     print('m',features.shape)
