@@ -100,22 +100,15 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     landmark_mean = np.zeros((3*num_landmark)) # 3M
     #landmark_mean = np.zeros((3,num_landmark)) # 3,M
     #landmark_cov  = 1e-3 * np.eye(3*num_landmark) #3M x 3M
-    landmark_cov  = np.diag(1e-6*np.random.randn(3*num_landmark))
+    landmark_cov  = np.diag(1e-8*np.random.randn(3*num_landmark))
+    landmark_mean_cam = np.zeros(3)
+    landmark_mean_cam_homog = np.zeros((4,1))
 
     P_T = np.hstack((np.eye(3),np.zeros((3,1)))).T
     M = np.hstack((k[0:2,0:3],np.zeros((2,1))))
     M = np.vstack((M,M))
     M[2,3] = -k[0,0] * b #Disparity
     total_time = z.shape[2]
-
-    #for t in tqdm(range(total_time)):
-    #    jacobian = np.zeros((4*num_landmark, 3*num_landmark))
-    #    z_tik = np.zeros((4 * num_landmark))
-    #    z_sum = np.sum(z[:,0:num_landmark,t],axis=0)
-    #    valid_scans = np.where(z_sum != -4)
-    #    print(len(valid_scans[0]))
-
-    #exit()
 
     no_observation = np.array([-1,-1,-1,-1])
     first_observation = np.zeros(3)
@@ -124,16 +117,19 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
         z_tik = np.zeros((4 * num_landmark))
         z_sum = np.sum(z[:,0:num_landmark,t],axis=0)
         valid_scans = np.where(z_sum != -4)
-
         #for landmark in range(num_landmark-1):
         for landmark in valid_scans[0]:
             lnd_mrk_strt, lnd_mrk_end = landmark * 3, landmark * 3 + 3
             if(np.all(landmark_mean[lnd_mrk_strt:lnd_mrk_end] == first_observation)):
                 #landmark_mean[lnd_mrk_strt:lnd_mrk_end] = inv_pi(np.linalg.inv(M.T @ M) @ M.T \
                 #                                              @ z[:,landmark,t].reshape(4,1))[0:3,0]
-                landmark_mean[lnd_mrk_strt+2] = -M[2,3] / (z[0,landmark,t] - z[2,landmark,t])
-                landmark_mean[lnd_mrk_strt+1] = (z[1,landmark,t]  - M[1,2]) * landmark_mean[lnd_mrk_strt+2] / M[1,1]
-                landmark_mean[lnd_mrk_strt  ] = (z[0,landmark,t]  - M[0,2]) * landmark_mean[lnd_mrk_strt+2] / M[0,0]
+                ## Convert Z into Camera Cordinates
+                landmark_mean_cam[2] = -M[2,3] / (z[0,landmark,t] - z[2,landmark,t])
+                landmark_mean_cam[1] = (z[1,landmark,t]  - M[1,2]) * landmark_mean_cam[2] / M[1,1]
+                landmark_mean_cam[0] = (z[0,landmark,t]  - M[0,2]) * landmark_mean_cam[2] / M[0,0]
+                landmark_mean_cam_homog = np.vstack((landmark_mean_cam.reshape(3,1),1))
+                landmark_mean_homog = np.linalg.inv(cam_T_imu @ pose_mean[:,:,t]) @ landmark_mean_cam_homog
+                landmark_mean[lnd_mrk_strt:lnd_mrk_end] = landmark_mean_homog[0:3,0]
                 #initialize
             else:
                 landmark_mean_homo = np.vstack((landmark_mean[lnd_mrk_strt:lnd_mrk_end].reshape(3,1),1))
@@ -144,7 +140,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
                 jacobian = M @  dpi_dq @ cam_T_imu @ pose_mean[:,:,t] @ P_T
                 k_gain = landmark_cov[strt:end,strt:end] @ jacobian.T @ \
                          np.linalg.inv(jacobian @  landmark_cov[strt:end,strt:end] @ jacobian.T \
-                                       + np.diag(1e6*np.random.randn(4)))
+                                       + np.diag(1e1*np.random.randn(4)))
                 landmark_mean[strt:end] = landmark_mean[strt:end] + k_gain @ (z[:,landmark,t] - z_tik)
                 landmark_cov[strt:end,strt:end] = (np.eye(3) - k_gain @ jacobian) @ landmark_cov[strt:end,strt:end]
 
@@ -168,15 +164,14 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
 
 
 if __name__ == '__main__':
-    data_set = 'data/0027.npz'
-    x = np.arange(10).reshape(2,5)
-    x_sum = np.sum(x,axis=0)
-    d = np.where(x_sum == 5)
-    t,features,linear_velocity,rotational_velocity,K,b,cam_T_imu = load_data(data_set)
-    print('t',t.shape)
-    print('m',features.shape)
-    print('M',K.shape)
-    print('M',K)
-    visual_ekf(imu_ekf(data_set),features,K,b,cam_T_imu)
+    dataset_list = ['data/0022.npz','data/0027.npz','data/0034.npz']
+
+    for data_set in dataset_list:
+        t,features,linear_velocity,rotational_velocity,K,b,cam_T_imu = load_data(data_set)
+        #print('t',t.shape)
+        #print('m',features.shape)
+        #print('M',K.shape)
+        #print('M',K)
+        visual_ekf(imu_ekf(data_set),features,K,b,cam_T_imu)
 
 
