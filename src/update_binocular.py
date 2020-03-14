@@ -100,7 +100,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     landmark_mean = np.zeros((3*num_landmark)) # 3M
     #landmark_mean = np.zeros((3,num_landmark)) # 3,M
     #landmark_cov  = 1e-3 * np.eye(3*num_landmark) #3M x 3M
-    landmark_cov  = np.diag(1e-8*np.random.randn(3*num_landmark))
+    landmark_cov  = np.diag(1e-2*np.random.randn(3*num_landmark))
     landmark_mean_cam = np.zeros(3)
     landmark_mean_cam_homog = np.zeros((4,1))
 
@@ -140,7 +140,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
                 jacobian = M @  dpi_dq @ cam_T_imu @ pose_mean[:,:,t] @ P_T
                 k_gain = landmark_cov[strt:end,strt:end] @ jacobian.T @ \
                          np.linalg.inv(jacobian @  landmark_cov[strt:end,strt:end] @ jacobian.T \
-                                       + np.diag(1e1*np.random.randn(4)))
+                                       + np.diag(30 * np.random.randn(4))) #np.diag(1e2) also worked
                 landmark_mean[strt:end] = landmark_mean[strt:end] + k_gain @ (z[:,landmark,t] - z_tik)
                 landmark_cov[strt:end,strt:end] = (np.eye(3) - k_gain @ jacobian) @ landmark_cov[strt:end,strt:end]
 
