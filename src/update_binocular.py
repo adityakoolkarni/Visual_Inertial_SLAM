@@ -120,7 +120,6 @@ def slam_imu_predict(time_stamp,features,v,omega,K,b,cam_T_imu,t,prev_pose,prev_
 
     z = features
     opt_T_imu = cam_T_imu
-    pose_mean = np.zeros((4,4))
     tau = time_stamp[0,t+1] - time_stamp[0,t]
     omega_hat = hat(omega[:,t])
     u_hat = np.hstack((omega_hat,v[:,t].reshape(3,1)))
@@ -130,7 +129,8 @@ def slam_imu_predict(time_stamp,features,v,omega,K,b,cam_T_imu,t,prev_pose,prev_
     #### Mean ####
     pose_mean = expm(-tau * u_hat) @ prev_pose
     #### Co-variance ####
-    W = np.random.randn(1) * prev_cov
+    #W = np.random.randn(1) * prev_cov
+    W = np.diag(np.random.randn(6))
     pose_cov = expm(-tau * curly_hat(omega_hat,v[:,t])) @ prev_cov \
                @ expm(-tau * curly_hat(omega_hat,v[:,t])).T + W
 
@@ -155,20 +155,25 @@ def slam(data_set):
     chosen_landmarks = [i for i in range(z.shape[1]) if i%20 == 0]
     last_landmark = max(chosen_landmarks)
 
+    #Temprory variables
+    landmark_mean_cam = np.zeros(3)
+    first_observation = np.zeros(3)
+
+
     #Projection Constants
     P_T = np.hstack((np.eye(3),np.zeros((3,1)))).T
     M = np.hstack((k[0:2,0:3],np.zeros((2,1))))
     M = np.vstack((M,M))
 
-    landmark_mean = np.zeros((3 * len(chosen_landmarks)))
-    state_cov = np.eye(3*len(chosen_landmarks)+6)
+    landmark_mean = np.zeros((3 * len(chosen_landmarks))) # Total LandMarks are 3M
+    state_cov = 2 * np.eye(3*len(chosen_landmarks)+6) #New State Variable with Size 3M+6
 
-    imu_prev_pose, imu_prev_cov = np.eye(4),  np.eye(6) # To predict module
-    pose_mean = np.zeros((4,4,features.shape[2])) #For plotting purpose
-    for t in tqdm(range(features.shape[2])):
+    imu_prev_pose, imu_prev_cov = np.eye(4),  0.5 *  np.eye(6) # To predict module Initialization
+    pose_mean = np.zeros((4,4,features.shape[2])) #For plotting purpose size is 4x4xT
+    for t in tqdm(range(features.shape[2]-1)):
         #### IMU Predict pos and covariance ####
         imu_pred_pos,imu_pred_cov = slam_imu_predict(time_stamp,z,v,omega,K,b,cam_T_imu,t,imu_prev_pose,imu_prev_cov)
-        state_cov[-7:-1,-7:-1] = imu_prev_cov
+        #state_cov[-7:-1,-7:-1] = imu_prev_cov
 
         z_tik = np.zeros((4 * len(chosen_landmarks),1))
         z_observed = np.zeros((4 * len(chosen_landmarks),1))
@@ -183,43 +188,58 @@ def slam(data_set):
             scan_loc = chosen_landmarks.index(scan) # The location of the current scan in the original array
             str_4x,end_4x = scan_loc*4, scan_loc*4+4
             str_3x,end_3x = scan_loc*3, scan_loc*3+3
-            landmark_mean_homo = np.vstack((landmark_mean[str_3x:end_3x].reshape(3, 1), 1))
-            landmark_camera = pi(cam_T_imu @ imu_pred_pos @ landmark_mean_homo)
-            dpi_dq = deri_pi(landmark_camera)
-            H_l[str_4x:end_4x,str_3x:end_3x] = M @  dpi_dq @ cam_T_imu @ imu_pred_pos @ P_T
 
-            ###### Jacobian for IMU Calculation #####
-            landmark_camera = cam_T_imu @ imu_pred_pos @ landmark_mean_homo
-            H_u[str_4x:end_4x,:] = M @ deri_pi(landmark_camera) @ round_dot(imu_pred_pos @ landmark_mean_homo)
+            ##### Initialization for scans seen for the first time ######
+            if (np.all(landmark_mean[str_3x:end_3x] == first_observation)):
+                ## Convert Z into Camera Cordinates
+                #z_temp = z[:,scan,t]
+                #z[:, scan, t] +=
+                landmark_mean_cam[2] = -M[2, 3] / (z[0, scan, t] - z[2, scan, t])
+                landmark_mean_cam[1] = (z[1, scan, t] - M[1, 2]) * landmark_mean_cam[2] / M[1, 1]
+                landmark_mean_cam[0] = (z[0, scan, t] - M[0, 2]) * landmark_mean_cam[2] / M[0, 0]
+                landmark_mean_cam_homog = np.vstack((landmark_mean_cam.reshape(3, 1), 1))
+                landmark_mean_homog = np.linalg.inv(cam_T_imu @ imu_pred_pos) @ landmark_mean_cam_homog
+                landmark_mean[str_3x:end_3x] = landmark_mean_homog[0:3, 0]
 
-            ###### Observed vs Expected ######
-            z_observed[str_4x:end_4x,0] = z[:,scan,t]
-            z_tik[str_4x:end_4x,0] = M @ pi(landmark_camera)
+            else:
+                landmark_mean_homo = np.vstack((landmark_mean[str_3x:end_3x].reshape(3, 1), 1))
+                landmark_camera = pi(cam_T_imu @ imu_pred_pos @ landmark_mean_homo)
+                #landmark_camera = cam_T_imu @ imu_pred_pos @ landmark_mean_homo
+                dpi_dq = deri_pi(landmark_camera)
+                H_l[str_4x:end_4x,str_3x:end_3x] = M @  dpi_dq @ cam_T_imu @ imu_pred_pos @ P_T
+
+                ###### Jacobian for IMU Calculation #####
+                H_u[str_4x:end_4x,:] = M @ deri_pi(landmark_camera) @ cam_T_imu @ round_dot(imu_pred_pos @ landmark_mean_homo) ##TODO: Not having cam in netween helps
+                ###### Observed vs Expected ######
+                z_observed[str_4x:end_4x,0] = z[:,scan,t]
+                z_tik[str_4x:end_4x,0] = M @ pi(landmark_camera)
 
         #### Update Combined Covariance####
         H = np.hstack((H_l,H_u))
-        N = np.random.rand(1) * np.diag(np.ones(H.shape[0]))
+        #noise = np.hstack((2 * np.random.rand(4*len(chosen_landmarks)),np.random.rand(6)))
+        #N =  np.random.rand(1) * np.diag(np.ones(H.shape[0]))
+        N =                      np.diag(3 * np.random.rand(H.shape[0]))
+        #N =  np.diag(noise)
         Kalman_gain = state_cov @ H.T @ np.linalg.inv(H @ state_cov @ H.T + N)
         state_cov = (np.eye(3*len(chosen_landmarks)+6) - Kalman_gain @ H) @ state_cov
         ##IMU Mean Update##
-        perturb_pos = Kalman_gain[-7:-1,:] @ (z_observed-z_tik)
+        perturb_pos = Kalman_gain[-6:,:] @ (z_observed-z_tik) #Pick last few rows to get IMU details
         perturb_pos_hat = np.hstack((hat(perturb_pos[3:6,0]),perturb_pos[0:3,0].reshape(3,1)))
         perturb_pos_hat = np.vstack((perturb_pos_hat,np.zeros((1,4))))
         imu_update_pose = expm(perturb_pos_hat) @ imu_pred_pos
         pose_mean[:,:,t] = imu_update_pose
         ##LandMark Mean Update ##
-        perturb_landmark = Kalman_gain[0:-6,:] @ (z_observed - z_tik)
+        perturb_landmark = Kalman_gain[0:-6,:] @ (z_observed - z_tik) #Pick first 3M rows
         landmark_mean = landmark_mean + perturb_landmark.reshape(-1)
 
 
 
         #update imu pos and cov with the updated value of these varaibles
         imu_prev_pose = imu_update_pose
-        imu_prev_cov = state_cov[-7:-1,-7:-1]
+        #imu_prev_cov = state_cov[-7:-1,-7:-1]
 
 
-        if(t==100):
-            visualize_trajectory_2d(pose_mean, landmark_mean.reshape(-1, 3).T)
+    visualize_trajectory_2d(pose_mean, landmark_mean.reshape(-1, 3).T)
 
 
 
@@ -300,7 +320,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
 
 if __name__ == '__main__':
     dataset_list = ['data/0022.npz','data/0027.npz','data/0034.npz']
-    dataset_list = ['data/0022.npz']
+    dataset_list = ['data/0027.npz']
 
     for data_set in dataset_list:
         t,features,linear_velocity,rotational_velocity,K,b,cam_T_imu = load_data(data_set)
