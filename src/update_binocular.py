@@ -5,7 +5,58 @@ import time
 
 from utils import visualize_trajectory_2d,load_data
 
+############## All Utility Functions ###############
+def round_dot(vec):
+    '''
 
+    :param vec: A point in homogeneous co-ordinate
+    :return: 0 representation for  the vector
+    '''
+    assert  vec.shape == (4,1)
+    vec_homog = to_homog(vec)
+    vec_hat = hat(vec_homog[0:3,0])
+    vec_round_dot = np.hstack((np.eye(3),-vec_hat))
+    vec_round_dot = np.vstack((vec_round_dot,np.zeros((1,6))))
+    return vec_round_dot
+
+def to_homog(vec):
+    '''
+
+    :param vec:
+    :return:
+    '''
+    assert vec.shape == (4,1)
+    return vec / vec[3,0]
+
+def pi(point):
+    '''
+    :param : point in 3D
+    :return: projected point in 2D
+    '''
+    point = point.reshape(4)
+    return point / point[2]
+
+def inv_pi(point):
+    '''
+
+    :param point: In 2D
+    :return: in 3D
+    '''
+    assert point.shape == (4,1)
+    return point * point[3]
+
+def deri_pi(point):
+    '''
+
+    :param point: derivative at this point is taken
+    :return: derivative
+    '''
+
+    point = point.reshape(4)
+    return np.array([[1,0,-point[0]/point[2],0],
+                     [0,1,-point[1]/point[2],0],
+                     [0,0,0,0],
+                     [0,0,-point[3]/point[2],1]]) / point[2]
 def hat(vec):
     '''
     This function computes the hat function
@@ -24,6 +75,8 @@ def curly_hat(omega_hat,v):
     curly_u = np.vstack((curly_u,np.hstack((np.zeros((3,3)),omega_hat))))
 
     return curly_u
+
+############## All Utility Functions Ends ###############
 
 def imu_ekf(data_set):
     '''
@@ -58,35 +111,117 @@ def imu_ekf(data_set):
     return pose_mean
 
 
-def pi(point):
+def slam_imu_predict(time_stamp,features,v,omega,K,b,cam_T_imu,t,prev_pose,prev_cov):
     '''
-    :param : point in 3D
-    :return: projected point in 2D
+    This function performs the update for the data received from the
+    Binocular Camera
     '''
-    point = point.reshape(4)
-    return point / point[2]
+    start_time = time.time()
 
-def inv_pi(point):
-    '''
+    z = features
+    opt_T_imu = cam_T_imu
+    pose_mean = np.zeros((4,4))
+    tau = time_stamp[0,t+1] - time_stamp[0,t]
+    omega_hat = hat(omega[:,t])
+    u_hat = np.hstack((omega_hat,v[:,t].reshape(3,1)))
+    u_hat = np.vstack((u_hat,np.zeros((1,4))))
 
-    :param point: In 2D
-    :return: in 3D
-    '''
-    assert point.shape == (4,1)
-    return point * point[3]
+    #### Predict IMU Pose ####
+    #### Mean ####
+    pose_mean = expm(-tau * u_hat) @ prev_pose
+    #### Co-variance ####
+    W = np.random.randn(1) * prev_cov
+    pose_cov = expm(-tau * curly_hat(omega_hat,v[:,t])) @ prev_cov \
+               @ expm(-tau * curly_hat(omega_hat,v[:,t])).T + W
 
-def deri_pi(point):
-    '''
+    #visualize_trajectory_2d(pose_mean)
+    #print("Done IMU Predict and time taken is ", time.time()-start_time)
+    return pose_mean, pose_cov
 
-    :param point: derivative at this point is taken
-    :return: derivative
-    '''
 
-    point = point.reshape(4)
-    return np.array([[1,0,-point[0]/point[2],0],
-                     [0,1,-point[1]/point[2],0],
-                     [0,0,0,0],
-                     [0,0,-point[3]/point[2],1]]) / point[2]
+def slam(data_set):
+    '''
+    This performs slam for the visual odometry data
+    Step 1: Performs predict for IMU pose
+    Step 2: Performs update for IMPU pose and landmark
+            Substep:  Compute Jacobian for H_l and H_u
+            Substep: Concatenate both of them
+            Substep: Perform overall update
+    :return:
+    '''
+    time_stamp,z,v,omega,k,b,cam_T_imu = load_data(data_set)
+
+    #Choosing Points in Map
+    chosen_landmarks = [i for i in range(z.shape[1]) if i%20 == 0]
+    last_landmark = max(chosen_landmarks)
+
+    #Projection Constants
+    P_T = np.hstack((np.eye(3),np.zeros((3,1)))).T
+    M = np.hstack((k[0:2,0:3],np.zeros((2,1))))
+    M = np.vstack((M,M))
+
+    landmark_mean = np.zeros((3 * len(chosen_landmarks)))
+    state_cov = np.eye(3*len(chosen_landmarks)+6)
+
+    imu_prev_pose, imu_prev_cov = np.eye(4),  np.eye(6) # To predict module
+    pose_mean = np.zeros((4,4,features.shape[2])) #For plotting purpose
+    for t in tqdm(range(features.shape[2])):
+        #### IMU Predict pos and covariance ####
+        imu_pred_pos,imu_pred_cov = slam_imu_predict(time_stamp,z,v,omega,K,b,cam_T_imu,t,imu_prev_pose,imu_prev_cov)
+        state_cov[-7:-1,-7:-1] = imu_prev_cov
+
+        z_tik = np.zeros((4 * len(chosen_landmarks),1))
+        z_observed = np.zeros((4 * len(chosen_landmarks),1))
+        z_sum = np.sum(z[:,0:last_landmark,t],axis=0)
+        valid_scans = np.where(z_sum != -4)
+        valid_and_relevant_scans = [scan for scan in valid_scans[0] if scan in chosen_landmarks]
+        #H_l = np.zeros((4*len(valid_and_relevant_scans),3*len(chosen_landmarks)))
+        H_l = np.zeros((4*len(chosen_landmarks),3*len(chosen_landmarks)))
+        H_u = np.zeros((4*len(chosen_landmarks),6))
+        for scan in valid_and_relevant_scans:
+            ###### Jacobian for Mapping Calculation #####
+            scan_loc = chosen_landmarks.index(scan) # The location of the current scan in the original array
+            str_4x,end_4x = scan_loc*4, scan_loc*4+4
+            str_3x,end_3x = scan_loc*3, scan_loc*3+3
+            landmark_mean_homo = np.vstack((landmark_mean[str_3x:end_3x].reshape(3, 1), 1))
+            landmark_camera = pi(cam_T_imu @ imu_pred_pos @ landmark_mean_homo)
+            dpi_dq = deri_pi(landmark_camera)
+            H_l[str_4x:end_4x,str_3x:end_3x] = M @  dpi_dq @ cam_T_imu @ imu_pred_pos @ P_T
+
+            ###### Jacobian for IMU Calculation #####
+            landmark_camera = cam_T_imu @ imu_pred_pos @ landmark_mean_homo
+            H_u[str_4x:end_4x,:] = M @ deri_pi(landmark_camera) @ round_dot(imu_pred_pos @ landmark_mean_homo)
+
+            ###### Observed vs Expected ######
+            z_observed[str_4x:end_4x,0] = z[:,scan,t]
+            z_tik[str_4x:end_4x,0] = M @ pi(landmark_camera)
+
+        #### Update Combined Covariance####
+        H = np.hstack((H_l,H_u))
+        N = np.random.rand(1) * np.diag(np.ones(H.shape[0]))
+        Kalman_gain = state_cov @ H.T @ np.linalg.inv(H @ state_cov @ H.T + N)
+        state_cov = (np.eye(3*len(chosen_landmarks)+6) - Kalman_gain @ H) @ state_cov
+        ##IMU Mean Update##
+        perturb_pos = Kalman_gain[-7:-1,:] @ (z_observed-z_tik)
+        perturb_pos_hat = np.hstack((hat(perturb_pos[3:6,0]),perturb_pos[0:3,0].reshape(3,1)))
+        perturb_pos_hat = np.vstack((perturb_pos_hat,np.zeros((1,4))))
+        imu_update_pose = expm(perturb_pos_hat) @ imu_pred_pos
+        pose_mean[:,:,t] = imu_update_pose
+        ##LandMark Mean Update ##
+        perturb_landmark = Kalman_gain[0:-6,:] @ (z_observed - z_tik)
+        landmark_mean = landmark_mean + perturb_landmark.reshape(-1)
+
+
+
+        #update imu pos and cov with the updated value of these varaibles
+        imu_prev_pose = imu_update_pose
+        imu_prev_cov = state_cov[-7:-1,-7:-1]
+
+
+        if(t==100):
+            visualize_trajectory_2d(pose_mean, landmark_mean.reshape(-1, 3).T)
+
+
 
 def visual_ekf(pose_mean,z,k,b,cam_T_imu):
     '''
@@ -133,7 +268,7 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
                 #initialize
             else:
                 landmark_mean_homo = np.vstack((landmark_mean[lnd_mrk_strt:lnd_mrk_end].reshape(3,1),1))
-                landmark_camera = pi(cam_T_imu @ pose_mean[:, :, t] @ landmark_mean_homo)
+                landmark_camera = pi(cam_T_imu @ pose_mean[:, :, t] @ landmark_mean_homo) #TODO: possible bug? Don't take pi
                 dpi_dq = deri_pi(landmark_camera)
                 strt,end = landmark*3,landmark*3 + 3 #Address
                 z_tik = (M @ landmark_camera).flatten()
@@ -165,13 +300,15 @@ def visual_ekf(pose_mean,z,k,b,cam_T_imu):
 
 if __name__ == '__main__':
     dataset_list = ['data/0022.npz','data/0027.npz','data/0034.npz']
+    dataset_list = ['data/0022.npz']
 
     for data_set in dataset_list:
         t,features,linear_velocity,rotational_velocity,K,b,cam_T_imu = load_data(data_set)
+        slam(data_set)
         #print('t',t.shape)
         #print('m',features.shape)
         #print('M',K.shape)
         #print('M',K)
-        visual_ekf(imu_ekf(data_set),features,K,b,cam_T_imu)
+        #visual_ekf(imu_ekf(data_set),features,K,b,cam_T_imu)
 
 
